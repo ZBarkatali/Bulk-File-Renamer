@@ -21,123 +21,99 @@ Before I do that though - I need to change the file path in PowerShell so that m
 
 The code for this should be as follows:
 
-from pathlib import Path
-from datetime import datetime
+import logging
 import re
+from pathlib import Path
 
-# =======================
-# CONFIG
-# =======================
-BASE_DIR = Path(__file__).parent
-TARGET_FOLDER = BASE_DIR / "test_files"
-LOG_FILE = BASE_DIR / "rename_log.txt"
+# ====================
+# RENAMING LOGIC
+# ====================
 
-DRY_RUN = True
-
-# Rename rules
-LOWERCASE = True
-REPLACE_SPACES_WITH = "_"   # set to None to leave spaces
-REMOVE_SPECIAL_CHARS = True # keeps letters, numbers, underscores, hyphens
-ADD_PREFIX = ""             # e.g. "client_"
-ADD_SUFFIX = ""             # e.g. "_archived"
-
-# Optional numbering
-ADD_NUMBERING = False
-NUMBER_START = 1
-NUMBER_PADDING = 3          # 001, 002, 003
-# =======================
-
-
-def log_line(action: str, message: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{ts} | {action:<7} | {message}\n")
-
-
-def clean_name(stem: str) -> str:
-    name = stem
-
-    if LOWERCASE:
-        name = name.lower()
-
-    if REPLACE_SPACES_WITH is not None:
-        name = name.replace(" ", REPLACE_SPACES_WITH)
-
-    if REMOVE_SPECIAL_CHARS:
-        # Keep letters/numbers/_/-
-        name = re.sub(r"[^a-zA-Z0-9_-]", "", name)
-
-    # Avoid empty names
-    if not name.strip():
-        name = "file"
-
-    return name
-
-
-def unique_path(path: Path) -> Path:
-    """If target name exists, add _1, _2, etc to avoid overwriting."""
-    if not path.exists():
-        return path
-
-    base = path.stem
-    ext = path.suffix
-    parent = path.parent
-
-    i = 1
-    while True:
-        candidate = parent / f"{base}_{i}{ext}"
-        if not candidate.exists():
-            return candidate
-        i += 1
-
-
-def main() -> None:
-    if not TARGET_FOLDER.exists():
-        print(f"[ERROR] Target folder not found: {TARGET_FOLDER}")
-        log_line("ERROR", f"Target folder not found: {TARGET_FOLDER}")
+def sanitize_filenames(target_folder, dry_run=True):
+    """
+    Scans a folder and renames files to be 'clean' (no spaces, no special chars).
+    """
+    target_path = Path(target_folder)
+    
+    logging.info(f"--- RENAMER STARTED: {target_path} ---")
+    
+    if not target_path.exists():
+        logging.error(f"Target folder does not exist: {target_path}")
         return
 
-    log_line("START", f"DRY_RUN={DRY_RUN} TARGET={TARGET_FOLDER}")
+    renamed_count = 0
+    errors = 0
 
-    files = [p for p in TARGET_FOLDER.iterdir() if p.is_file()]
-    if not files:
-        print("No files found to rename.")
-        log_line("DONE", "No files found")
-        return
-
-    counter = NUMBER_START
-
-    for file in files:
-        original = file.name
-        ext = file.suffix
-
-        new_stem = clean_name(file.stem)
-        new_stem = f"{ADD_PREFIX}{new_stem}{ADD_SUFFIX}"
-
-        if ADD_NUMBERING:
-            new_stem = f"{new_stem}_{str(counter).zfill(NUMBER_PADDING)}"
-            counter += 1
-
-        new_path = file.with_name(new_stem + ext)
-        new_path = unique_path(new_path)
-
-        if new_path.name == original:
+    # We iterate over the directory
+    for current_file in target_path.iterdir():
+        if not current_file.is_file():
+            continue
+            
+        # Skip this script and the log file/config
+        if current_file.name in ["renamer.py", "__init__.py", "config.json"]:
             continue
 
-        if DRY_RUN:
-            print(f"[DRY RUN] {original}  ->  {new_path.name}")
-            log_line("DRYRUN", f"{original} -> {new_path.name}")
-        else:
-            file.rename(new_path)
-            print(f"[RENAMED] {original}  ->  {new_path.name}")
-            log_line("RENAMED", f"{original} -> {new_path.name}")
+        original_name = current_file.name
+        new_name = original_name
 
-    log_line("DONE", "Completed rename run")
-    print(f"Done. Log written to: {LOG_FILE}")
+        # --- RULE 1: Replace spaces with underscores ---
+        new_name = new_name.replace(" ", "_")
+        
+        # --- RULE 2: Remove brackets like (1) or [Copy] ---
+        new_name = re.sub(r"[\(\[].*?[\)\]]", "", new_name)
+        
+        # --- RULE 3: Remove double underscores created by the above ---
+        while "__" in new_name:
+            new_name = new_name.replace("__", "_")
+            
+        # --- RULE 4: Strip leading/trailing underscores ---
+        new_name = new_name.strip("_")
+
+        # If nothing changed, skip it
+        if new_name == original_name:
+            continue
+            
+        # Construct full path
+        destination = current_file.parent / new_name
+        
+        try:
+            if dry_run:
+                logging.info(f"[DRY RUN] Would rename: '{original_name}' -> '{new_name}'")
+            else:
+                # Check if destination already exists to prevent overwriting
+                if destination.exists():
+                    logging.warning(f"Skipping '{original_name}': Target '{new_name}' already exists.")
+                    errors += 1
+                    continue
+                    
+                current_file.rename(destination)
+                logging.info(f"[RENAMED] '{original_name}' -> '{new_name}'")
+                renamed_count += 1
+                
+        except Exception as e:
+            logging.error(f"Failed to rename {original_name}: {e}")
+            errors += 1
+
+    logging.info(f"--- RENAMER FINISHED: Renamed {renamed_count} files. Errors: {errors} ---")
 
 
+# ====================
+# STANDALONE MODE
+# ====================
 if __name__ == "__main__":
-    main()
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    
+    BASE_DIR = Path(__file__).parent
+    TEST_TARGET = BASE_DIR / "test_files"
+    
+    # Create a messy file to test
+    TEST_TARGET.mkdir(exist_ok=True)
+    messy_file = TEST_TARGET / "My  Messy File (1).txt"
+    messy_file.touch()
+    
+    print("Running in STANDALONE mode...")
+    # Set dry_run=False if you want to actually see the file change name
+    sanitize_filenames(TEST_TARGET, dry_run=True)
 
 
 #### Author ####
